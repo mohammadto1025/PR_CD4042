@@ -151,3 +151,60 @@ class Lexer:
                 return Token('STRING', lexeme, start_line, start_col, self.filename)
             escaped = False
             self.advance()
+
+    def read_character(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        self.advance()  
+        escaped = False
+        while True:
+            ch = self.peek()
+            if ch is None:
+                lexeme = self.code[start:self.index]
+                return Token('INVALID', lexeme, start_line, start_col,
+                             self.filename, error="Unterminated character literal")
+            if ch == '\\' and not escaped:
+                escaped = True
+                self.advance()
+                self.advance()
+                continue
+            if ch == "'" and not escaped:
+                self.advance()
+                lexeme = self.code[start:self.index]
+                return Token('CHARACTER', lexeme, start_line, start_col, self.filename)
+            escaped = False
+            self.advance()
+
+    def read_comment(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        if self.peek() == '/' and self.peek(1) == '/':
+            self.advance(); self.advance()
+            while True:
+                ch = self.peek()
+                if ch is None or ch == '\n':
+                    break
+                self.advance()
+            return None  
+
+        elif self.peek() == '/' and self.peek(1) == '*':
+            self.advance(); self.advance()
+            nested = 1
+            while True:
+                ch = self.peek()
+                if ch is None:
+                    lexeme = self.code[start:self.index]
+                    return Token('INVALID', lexeme, start_line, start_col,
+                                 self.filename, error="Unterminated block comment")
+                if ch == '*' and self.peek(1) == '/':
+                    self.advance(); self.advance()
+                    nested -= 1
+                    if nested == 0:
+                        break
+                elif ch == '/' and self.peek(1) == '*':
+                    self.advance(); self.advance()
+                    nested += 1
+                else:
+                    self.advance()
+            return None  
+        return None
