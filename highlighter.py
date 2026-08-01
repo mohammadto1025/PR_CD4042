@@ -102,3 +102,49 @@ class SyntaxHighlighter:
             return 'INVALID'
         else:
             return None
+
+    def to_ansi(self):
+        result = ""
+        for token in self.tokens:
+            color_key = self._get_color_for_token(token)
+            if color_key and color_key in self.COLORS:
+                ansi_code = self.COLORS[color_key][0]
+                result += f"{ansi_code}{token.lexeme}\033[0m"
+            else:
+                result += token.lexeme  
+        return result
+
+    def to_html(self, filename="highlighted.html"):
+        css = """
+        <style>
+            body { background-color: #1e1e1e; color: #d4d4d4; font-family: Consolas, monospace; padding: 20px; }
+            pre { white-space: pre-wrap; }
+            .kw { color: #569cd6; font-weight: bold; }
+            .type { color: #4ec9b0; }
+            .var { color: #d4d4d4; }
+            .func { color: #dcdcaa; }
+            .type_name { color: #4ec9b0; }
+            .int, .float { color: #b5cea8; }
+            .string, .char { color: #ce9178; }
+            .op { color: #d4d4d4; }
+            .comment { color: #6a9955; font-style: italic; }
+            .preproc { color: #c586c0; }
+            .invalid { color: #f44747; text-decoration: underline red; }
+            .delim { color: #d4d4d4; }
+        </style>
+        """
+        html = f"<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Highlighted Code</title>{css}</head><body><pre>"
+        for token in self.tokens:
+            color_key = self._get_color_for_token(token)
+            if color_key and color_key in self.COLORS:
+                css_class = self.COLORS[color_key][1]
+                html += f"<span class='{css_class}'>{self._escape_html(token.lexeme)}</span>"
+            else:
+                html += self._escape_html(token.lexeme)       
+        html += "</pre></body></html>"        
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html)
+        return filename
+
+    def _escape_html(self, text):
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
