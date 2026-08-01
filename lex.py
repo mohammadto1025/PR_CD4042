@@ -68,3 +68,86 @@ class Lexer:
             token_type = 'KEYWORD' if lexeme in self.keywords else 'IDENTIFIER'
             return Token(token_type, lexeme, start_line, start_col, self.filename)
         return None
+
+    def read_number(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        ch = self.peek()
+        if ch == '0' and self.peek(1) in ('x', 'X'):
+            self.advance(); self.advance()
+            while True:
+                ch = self.peek()
+                if ch is not None and ch in '0123456789abcdefABCDEF':
+                    self.advance()
+                else:
+                    break
+            lexeme = self.code[start:self.index]
+            return Token('INTEGER', lexeme, start_line, start_col, self.filename)
+        if ch == '0' and self.peek(1) in ('b', 'B'):
+            self.advance(); self.advance()
+            while True:
+                ch = self.peek()
+                if ch is not None and ch in '01':
+                    self.advance()
+                else:
+                    break
+            lexeme = self.code[start:self.index]
+            return Token('INTEGER', lexeme, start_line, start_col, self.filename)
+        is_float = False
+        while True:
+            ch = self.peek()
+            if ch is not None and ch.isdigit():
+                self.advance()
+            else:
+                break
+        if self.peek() == '.':
+            self.advance()
+            is_float = True
+            while True:
+                ch = self.peek()
+                if ch is not None and ch.isdigit():
+                    self.advance()
+                else:
+                    break
+        if self.peek() in ('e', 'E'):
+            self.advance()
+            is_float = True
+            if self.peek() in ('+', '-'):
+                self.advance()
+            while True:
+                ch = self.peek()
+                if ch is not None and ch.isdigit():
+                    self.advance()
+                else:
+                    break
+        if self.peek() in ('f', 'F'):
+            self.advance()
+            is_float = True
+        lexeme = self.code[start:self.index]
+        if not lexeme:
+            return None
+        token_type = 'FLOAT' if is_float else 'INTEGER'
+        return Token(token_type, lexeme, start_line, start_col, self.filename)
+
+    def read_string(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        self.advance()  
+        escaped = False
+        while True:
+            ch = self.peek()
+            if ch is None:
+                lexeme = self.code[start:self.index]
+                return Token('INVALID', lexeme, start_line, start_col,
+                             self.filename, error="Unterminated string literal")
+            if ch == '\\' and not escaped:
+                escaped = True
+                self.advance()
+                self.advance()
+                continue
+            if ch == '"' and not escaped:
+                self.advance()
+                lexeme = self.code[start:self.index]
+                return Token('STRING', lexeme, start_line, start_col, self.filename)
+            escaped = False
+            self.advance()
