@@ -222,3 +222,18 @@ class Lexer:
             self.advance()
             return Token('DELIMITER', ch, start_line, start_col, self.filename)
         return None
+
+    def read_preprocessor(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        if self.peek() == '#':
+            self.advance()
+            while True:
+                ch = self.peek()
+                if ch is not None and (ch.isalnum() or ch == '_'):
+                    self.advance()
+                else:
+                    break
+            lexeme = self.code[start:self.index]
+            return Token('PREPROCESSOR', lexeme, start_line, start_col, self.filename)
+        return None
