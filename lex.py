@@ -35,3 +35,36 @@ class Lexer:
         }
         self.delimiters = {'{', '}', '(', ')', '[', ']', ';', ',', ':'}
         self.operator_list = sorted(self.operators, key=len, reverse=True)
+
+    def peek(self, offset=0):
+        pos = self.index + offset
+        if pos < self.length:
+            return self.code[pos]
+        return None
+
+    def advance(self):
+        ch = self.peek()
+        if ch is not None:
+            self.index += 1
+            if ch == '\n':
+                self.line += 1
+                self.column = 1
+            else:
+                self.column += 1
+        return ch
+
+    def read_identifier_or_keyword(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        ch = self.peek()
+        if ch is not None and (ch.isalpha() or ch == '_'):
+            while True:
+                ch = self.peek()
+                if ch is not None and (ch.isalnum() or ch == '_'):
+                    self.advance()
+                else:
+                    break
+            lexeme = self.code[start:self.index]
+            token_type = 'KEYWORD' if lexeme in self.keywords else 'IDENTIFIER'
+            return Token(token_type, lexeme, start_line, start_col, self.filename)
+        return None
