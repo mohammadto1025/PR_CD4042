@@ -237,3 +237,47 @@ class Lexer:
             lexeme = self.code[start:self.index]
             return Token('PREPROCESSOR', lexeme, start_line, start_col, self.filename)
         return None
+
+    def next_token(self):
+        while self.index < self.length:
+            ch = self.peek()
+            if ch is not None and ch.isspace():
+                start_line, start_col = self.line, self.column
+                lexeme = self.advance()
+                return Token('WHITESPACE', lexeme, start_line, start_col, self.filename)
+            if ch == '/' and self.peek(1) in ('/', '*'):
+                comment_token = self.read_comment()
+                if comment_token is None:
+                    continue
+                return comment_token
+            if ch == '#':
+                tok = self.read_preprocessor()
+                if tok:
+                    return tok
+            if ch == '"':
+                return self.read_string()
+            if ch == "'":
+                return self.read_character()
+            if ch.isdigit() or (ch == '.' and self.peek(1) and self.peek(1).isdigit()):
+                tok = self.read_number()
+                if tok:
+                    return tok
+            if ch.isalpha() or ch == '_':
+                return self.read_identifier_or_keyword()
+            tok = self.read_operator_or_delimiter()
+            if tok:
+                return tok
+            start_line, start_col = self.line, self.column
+            invalid_ch = self.advance()
+            return Token('INVALID', invalid_ch, start_line, start_col,
+                         self.filename, error=f"Unrecognized character '{invalid_ch}'")
+        return None  
+
+    def tokenize(self):
+        tokens = []
+        while True:
+            tok = self.next_token()
+            if tok is None:
+                break
+            tokens.append(tok)
+        return tokens
