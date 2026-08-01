@@ -208,3 +208,17 @@ class Lexer:
                     self.advance()
             return None  
         return None
+
+    def read_operator_or_delimiter(self):
+        start = self.index
+        start_line, start_col = self.line, self.column
+        for op in self.operator_list:
+            if self.code.startswith(op, self.index):
+                for _ in op:
+                    self.advance()
+                return Token('OPERATOR', op, start_line, start_col, self.filename)
+        ch = self.peek()
+        if ch in self.delimiters:
+            self.advance()
+            return Token('DELIMITER', ch, start_line, start_col, self.filename)
+        return None
