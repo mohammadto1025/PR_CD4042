@@ -1,3 +1,6 @@
+from diagnostic import DiagnosticBag
+
+
 class Token:
     def __init__(self, type, lexeme, line, column, file=None, error=None):
         self.type = type
@@ -7,8 +10,13 @@ class Token:
         self.file = file
         self.error = error
 
+    @property
+    def length(self):
+        return max(1, len(self.lexeme))
+
     def __repr__(self):
         return f"Token({self.type}, '{self.lexeme}', {self.line}:{self.column})"
+
 
 class Lexer:
     def __init__(self, code, filename="<input>"):
@@ -18,6 +26,7 @@ class Lexer:
         self.line = 1
         self.column = 1
         self.length = len(code)
+        self.diagnostics = DiagnosticBag()
 
         self.keywords = {
             'if', 'else', 'while', 'for', 'return', 'int', 'float', 'char',
@@ -35,6 +44,25 @@ class Lexer:
         }
         self.delimiters = {'{', '}', '(', ')', '[', ']', ';', ',', ':'}
         self.operator_list = sorted(self.operators, key=len, reverse=True)
+
+    def _token(self, token_type, lexeme, line, column, error=None):
+        token = Token(
+            token_type,
+            lexeme,
+            line,
+            column,
+            self.filename,
+            error=error,
+        )
+        if token_type == 'INVALID':
+            self.diagnostics.error(
+                error or f"Invalid token '{lexeme}'",
+                file=self.filename,
+                line=max(1, line),
+                column=max(1, column),
+                length=max(1, len(lexeme)),
+            )
+        return token
 
     def peek(self, offset=0):
         pos = self.index + offset
@@ -66,218 +94,299 @@ class Lexer:
                     break
             lexeme = self.code[start:self.index]
             token_type = 'KEYWORD' if lexeme in self.keywords else 'IDENTIFIER'
-            return Token(token_type, lexeme, start_line, start_col, self.filename)
+            return self._token(token_type, lexeme, start_line, start_col)
         return None
 
     def read_number(self):
         start = self.index
         start_line, start_col = self.line, self.column
         ch = self.peek()
+
         if ch == '0' and self.peek(1) in ('x', 'X'):
-            self.advance(); self.advance()
-            while True:
-                ch = self.peek()
-                if ch is not None and ch in '0123456789abcdefABCDEF':
-                    self.advance()
-                else:
-                    break
-            lexeme = self.code[start:self.index]
-            return Token('INTEGER', lexeme, start_line, start_col, self.filename)
-        if ch == '0' and self.peek(1) in ('b', 'B'):
-            self.advance(); self.advance()
-            while True:
-                ch = self.peek()
-                if ch is not None and ch in '01':
-                    self.advance()
-                else:
-                    break
-            lexeme = self.code[start:self.index]
-            return Token('INTEGER', lexeme, start_line, start_col, self.filename)
-        is_float = False
-        while True:
-            ch = self.peek()
-            if ch is not None and ch.isdigit():
+            self.advance()
+            self.advance()
+            digit_start = self.index
+            while self.peek() is not None and self.peek() in '0123456789abcdefABCDEF':
                 self.advance()
-            else:
-                break
+            lexeme = self.code[start:self.index]
+            if self.index == digit_start:
+                return self._token(
+                    'INVALID', lexeme, start_line, start_col,
+                    "Hexadecimal literal requires at least one digit",
+                )
+            return self._token('INTEGER', lexeme, start_line, start_col)
+
+        if ch == '0' and self.peek(1) in ('b', 'B'):
+            self.advance()
+            self.advance()
+            digit_start = self.index
+            while self.peek() is not None and self.peek() in '01':
+                self.advance()
+            lexeme = self.code[start:self.index]
+            if self.index == digit_start:
+                return self._token(
+                    'INVALID', lexeme, start_line, start_col,
+                    "Binary literal requires at least one digit",
+                )
+            return self._token('INTEGER', lexeme, start_line, start_col)
+
+        is_float = False
+        while self.peek() is not None and self.peek().isdigit():
+            self.advance()
+
         if self.peek() == '.':
             self.advance()
             is_float = True
-            while True:
-                ch = self.peek()
-                if ch is not None and ch.isdigit():
-                    self.advance()
-                else:
-                    break
+            while self.peek() is not None and self.peek().isdigit():
+                self.advance()
+
         if self.peek() in ('e', 'E'):
+            exponent_index = self.index
             self.advance()
             is_float = True
             if self.peek() in ('+', '-'):
                 self.advance()
-            while True:
-                ch = self.peek()
-                if ch is not None and ch.isdigit():
-                    self.advance()
-                else:
-                    break
+            exponent_digits = self.index
+            while self.peek() is not None and self.peek().isdigit():
+                self.advance()
+            if self.index == exponent_digits:
+                lexeme = self.code[start:self.index]
+                return self._token(
+                    'INVALID', lexeme, start_line, start_col,
+                    "Floating-point exponent requires digits",
+                )
+
         if self.peek() in ('f', 'F'):
             self.advance()
             is_float = True
+
         lexeme = self.code[start:self.index]
         if not lexeme:
             return None
-        token_type = 'FLOAT' if is_float else 'INTEGER'
-        return Token(token_type, lexeme, start_line, start_col, self.filename)
+        return self._token(
+            'FLOAT' if is_float else 'INTEGER',
+            lexeme,
+            start_line,
+            start_col,
+        )
 
     def read_string(self):
         start = self.index
         start_line, start_col = self.line, self.column
-        self.advance()  
+        self.advance()
         escaped = False
+
         while True:
             ch = self.peek()
             if ch is None:
-                lexeme = self.code[start:self.index]
-                return Token('INVALID', lexeme, start_line, start_col,
-                             self.filename, error="Unterminated string literal")
-            if ch == '\\' and not escaped:
-                escaped = True
-                self.advance()
-                self.advance()
-                continue
-            if ch == '"' and not escaped:
-                self.advance()
-                lexeme = self.code[start:self.index]
-                return Token('STRING', lexeme, start_line, start_col, self.filename)
-            escaped = False
+                return self._token(
+                    'INVALID',
+                    self.code[start:self.index],
+                    start_line,
+                    start_col,
+                    "Unterminated string literal",
+                )
+            if ch == '\n' and not escaped:
+                return self._token(
+                    'INVALID',
+                    self.code[start:self.index],
+                    start_line,
+                    start_col,
+                    "Unterminated string literal before end of line",
+                )
             self.advance()
+            if escaped:
+                escaped = False
+                continue
+            if ch == '\\':
+                escaped = True
+                continue
+            if ch == '"':
+                return self._token(
+                    'STRING',
+                    self.code[start:self.index],
+                    start_line,
+                    start_col,
+                )
 
     def read_character(self):
         start = self.index
         start_line, start_col = self.line, self.column
-        self.advance()  
+        self.advance()
         escaped = False
+
         while True:
             ch = self.peek()
             if ch is None:
-                lexeme = self.code[start:self.index]
-                return Token('INVALID', lexeme, start_line, start_col,
-                             self.filename, error="Unterminated character literal")
-            if ch == '\\' and not escaped:
-                escaped = True
-                self.advance()
-                self.advance()
-                continue
-            if ch == "'" and not escaped:
-                self.advance()
-                lexeme = self.code[start:self.index]
-                return Token('CHARACTER', lexeme, start_line, start_col, self.filename)
-            escaped = False
+                return self._token(
+                    'INVALID',
+                    self.code[start:self.index],
+                    start_line,
+                    start_col,
+                    "Unterminated character literal",
+                )
+            if ch == '\n' and not escaped:
+                return self._token(
+                    'INVALID',
+                    self.code[start:self.index],
+                    start_line,
+                    start_col,
+                    "Unterminated character literal before end of line",
+                )
             self.advance()
+            if escaped:
+                escaped = False
+                continue
+            if ch == '\\':
+                escaped = True
+                continue
+            if ch == "'":
+                return self._token(
+                    'CHARACTER',
+                    self.code[start:self.index],
+                    start_line,
+                    start_col,
+                )
 
     def read_comment(self):
         start = self.index
         start_line, start_col = self.line, self.column
-        if self.peek() == '/' and self.peek(1) == '/':
-            self.advance(); self.advance()
-            while True:
-                ch = self.peek()
-                if ch is None or ch == '\n':
-                    break
-                self.advance()
-            return None  
 
-        elif self.peek() == '/' and self.peek(1) == '*':
-            self.advance(); self.advance()
+        if self.peek() == '/' and self.peek(1) == '/':
+            self.advance()
+            self.advance()
+            while self.peek() is not None and self.peek() != '\n':
+                self.advance()
+            return self._token(
+                'COMMENT',
+                self.code[start:self.index],
+                start_line,
+                start_col,
+            )
+
+        if self.peek() == '/' and self.peek(1) == '*':
+            self.advance()
+            self.advance()
             nested = 1
             while True:
                 ch = self.peek()
                 if ch is None:
-                    lexeme = self.code[start:self.index]
-                    return Token('INVALID', lexeme, start_line, start_col,
-                                 self.filename, error="Unterminated block comment")
+                    return self._token(
+                        'INVALID',
+                        self.code[start:self.index],
+                        start_line,
+                        start_col,
+                        "Unterminated block comment",
+                    )
                 if ch == '*' and self.peek(1) == '/':
-                    self.advance(); self.advance()
+                    self.advance()
+                    self.advance()
                     nested -= 1
                     if nested == 0:
-                        break
+                        return self._token(
+                            'COMMENT',
+                            self.code[start:self.index],
+                            start_line,
+                            start_col,
+                        )
                 elif ch == '/' and self.peek(1) == '*':
-                    self.advance(); self.advance()
+                    # Supporting nested comments is harmless for this teaching subset.
+                    self.advance()
+                    self.advance()
                     nested += 1
                 else:
                     self.advance()
-            return None  
+
         return None
 
     def read_operator_or_delimiter(self):
-        start = self.index
         start_line, start_col = self.line, self.column
         for op in self.operator_list:
             if self.code.startswith(op, self.index):
                 for _ in op:
                     self.advance()
-                return Token('OPERATOR', op, start_line, start_col, self.filename)
+                return self._token('OPERATOR', op, start_line, start_col)
+
         ch = self.peek()
         if ch in self.delimiters:
             self.advance()
-            return Token('DELIMITER', ch, start_line, start_col, self.filename)
+            return self._token('DELIMITER', ch, start_line, start_col)
         return None
 
     def read_preprocessor(self):
         start = self.index
         start_line, start_col = self.line, self.column
-        if self.peek() == '#':
+        if self.peek() != '#':
+            return None
+
+        self.advance()
+        while self.peek() is not None and (self.peek().isalnum() or self.peek() == '_'):
             self.advance()
-            while True:
-                ch = self.peek()
-                if ch is not None and (ch.isalnum() or ch == '_'):
-                    self.advance()
-                else:
-                    break
-            lexeme = self.code[start:self.index]
-            return Token('PREPROCESSOR', lexeme, start_line, start_col, self.filename)
-        return None
+        return self._token(
+            'PREPROCESSOR',
+            self.code[start:self.index],
+            start_line,
+            start_col,
+        )
 
     def next_token(self):
         while self.index < self.length:
             ch = self.peek()
+
             if ch is not None and ch.isspace():
                 start_line, start_col = self.line, self.column
-                lexeme = self.advance()
-                return Token('WHITESPACE', lexeme, start_line, start_col, self.filename)
+                return self._token(
+                    'WHITESPACE',
+                    self.advance(),
+                    start_line,
+                    start_col,
+                )
+
             if ch == '/' and self.peek(1) in ('/', '*'):
-                comment_token = self.read_comment()
-                if comment_token is None:
-                    continue
-                return comment_token
+                return self.read_comment()
+
             if ch == '#':
-                tok = self.read_preprocessor()
-                if tok:
-                    return tok
+                token = self.read_preprocessor()
+                if token is not None:
+                    return token
+
             if ch == '"':
                 return self.read_string()
+
             if ch == "'":
                 return self.read_character()
-            if ch.isdigit() or (ch == '.' and self.peek(1) and self.peek(1).isdigit()):
-                tok = self.read_number()
-                if tok:
-                    return tok
+
+            if ch.isdigit() or (
+                ch == '.'
+                and self.peek(1) is not None
+                and self.peek(1).isdigit()
+            ):
+                return self.read_number()
+
             if ch.isalpha() or ch == '_':
                 return self.read_identifier_or_keyword()
-            tok = self.read_operator_or_delimiter()
-            if tok:
-                return tok
+
+            token = self.read_operator_or_delimiter()
+            if token is not None:
+                return token
+
             start_line, start_col = self.line, self.column
             invalid_ch = self.advance()
-            return Token('INVALID', invalid_ch, start_line, start_col,
-                         self.filename, error=f"Unrecognized character '{invalid_ch}'")
-        return None  
+            return self._token(
+                'INVALID',
+                invalid_ch,
+                start_line,
+                start_col,
+                f"Unrecognized character '{invalid_ch}'",
+            )
+
+        return None
 
     def tokenize(self):
         tokens = []
         while True:
-            tok = self.next_token()
-            if tok is None:
+            token = self.next_token()
+            if token is None:
                 break
-            tokens.append(tok)
+            tokens.append(token)
         return tokens
