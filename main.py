@@ -10,25 +10,15 @@ from callgraphvisual import CallGraphHTMLRenderer
 
 
 code = """
-int leaf(int x) {
-    return x + 1;
-}
-
-int helper(int n) {
-    return leaf(n);
-}
-
-int recurse(int n) {
-    if (n <= 0) return 0;
-    return recurse(n - 1);
-}
-
-int unused() {
-    return 42;
+int factorial(int n) {
+    if (n <= 1) return 1;
+    return n * factorial(n - 1);
 }
 
 int main() {
-    return helper(1) + recurse(2);
+    int result;
+    result = factorial(5);
+    return result;
 }
 """
 
@@ -84,9 +74,9 @@ if len(phase2_result.diagnostics) == 0:
 else:
     print(phase2_result.format_diagnostics())
 
-print("\nCompletion at line 20, column 5:")
+print("\nCompletion at line 9, column 5:")
 completion_items = phase2_result.complete(
-    line=20,
+    line=9,
     column=5,
 )
 if len(completion_items) == 0:
@@ -95,10 +85,10 @@ else:
     for item in completion_items:
         print(item)
 
-print("\nHover at line 20, column 12:")
+print("\nHover at line 9, column 14:")
 hover_info = phase2_result.hover(
-    line=20,
-    column=12,
+    line=9,
+    column=14,
 )
 if hover_info is None:
     print("No hover information.")
@@ -157,8 +147,8 @@ print("=" * 50)
 print("Phase Three - Go-to-Definition:")
 
 definition = phase3_result.goto_definition(
-    line=20,
-    column=12,
+    line=9,
+    column=14,
 )
 
 if definition is None:
@@ -170,8 +160,8 @@ print("=" * 50)
 print("Phase Three - Find All References:")
 
 references = phase3_result.find_references(
-    line=20,
-    column=12,
+    line=9,
+    column=14,
     include_definition=True,
 )
 
@@ -185,8 +175,8 @@ print("=" * 50)
 print("Phase Three - Safe Rename:")
 
 rename_result = phase3_result.rename(
-    line=20,
-    column=12,
+    line=9,
+    column=14,
     new_name="process",
 )
 
