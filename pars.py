@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Any
 
+from diagnostic import DiagnosticBag
+
 class Token:
     def __init__(self, type, lexeme, line, column, file=None, error=None):
         self.type = type
@@ -12,6 +14,7 @@ class Token:
 
     def __repr__(self):
         return f"Token({self.type}, '{self.lexeme}', {self.line}:{self.column})"
+
 
 class ASTNode:
     def __init__(self, loc=None):
@@ -280,432 +283,1145 @@ class CharLiteral(ASTNode):
     def __str__(self):
         return f"CharLiteral(value={self.value}, {self._format_loc()})"
 
+
+
+class BreakStmt(ASTNode):
+    def __init__(self, loc=None):
+        super().__init__(loc)
+
+    def __str__(self):
+        return f"BreakStmt({self._format_loc()})"
+
+
+class ContinueStmt(ASTNode):
+    def __init__(self, loc=None):
+        super().__init__(loc)
+
+    def __str__(self):
+        return f"ContinueStmt({self._format_loc()})"
+
+
 class Parser:
+    TYPE_KEYWORDS = {'int', 'float', 'char', 'void', 'double'}
+    TRIVIA_TYPES = {'WHITESPACE', 'COMMENT'}
+    STATEMENT_KEYWORDS = {
+        'if', 'while', 'for', 'return', 'break', 'continue',
+        'int', 'float', 'char', 'void', 'double', 'struct',
+    }
+
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
         self.pos = 0
-        self._skip_whitespace()
-        self.current_token = self.tokens[self.pos] if self.pos < len(self.tokens) else None
         self.errors = []
-        
-    def _skip_whitespace(self):
-        while self.pos < len(self.tokens) and self.tokens[self.pos].type == 'WHITESPACE':
+        self.diagnostics = DiagnosticBag()
+        self._skip_trivia()
+        self.current_token = (
+            self.tokens[self.pos]
+            if self.pos < len(self.tokens)
+            else None
+        )
+
+    def _skip_trivia(self):
+        while (
+            self.pos < len(self.tokens)
+            and self.tokens[self.pos].type in self.TRIVIA_TYPES
+        ):
             self.pos += 1
 
-    def peek(self):
-        self._skip_whitespace()
-        if self.pos < len(self.tokens):
-            self.current_token = self.tokens[self.pos]
-        else:
-            self.current_token = None
+    def _significant_token(self, offset=0):
+        index = self.pos
+        seen = 0
+        while index < len(self.tokens):
+            token = self.tokens[index]
+            if token.type not in self.TRIVIA_TYPES:
+                if seen == offset:
+                    return token
+                seen += 1
+            index += 1
+        return None
+
+    def peek(self, offset=0):
+        self._skip_trivia()
+        if offset:
+            return self._significant_token(offset)
+        self.current_token = (
+            self.tokens[self.pos]
+            if self.pos < len(self.tokens)
+            else None
+        )
         return self.current_token
 
     def advance(self):
-        if self.current_token:
+        if self.current_token is not None:
             self.pos += 1
-        self._skip_whitespace()
-        if self.pos < len(self.tokens):
-            self.current_token = self.tokens[self.pos]
-        else:
-            self.current_token = None
+        self._skip_trivia()
+        self.current_token = (
+            self.tokens[self.pos]
+            if self.pos < len(self.tokens)
+            else None
+        )
         return self.current_token
 
-    def match(self, expected_type, error_msg=None):
-        token = self.peek()  
-        if token and token.type == expected_type:
-            self.advance()
-            return token
-        else:
-            if error_msg is None:
-                error_msg = f"Expected '{expected_type}', got '{token.type if token else 'EOF'}'"
-            self.panic(error_msg, token)
-            return None
+    def _matches(self, token, expected_type, expected_lexeme=None):
+        return (
+            token is not None
+            and token.type == expected_type
+            and (
+                expected_lexeme is None
+                or token.lexeme == expected_lexeme
+            )
+        )
 
-    def expect(self, expected_type, error_msg=None, expected_lexeme=None):
+    def _synthetic_token(self, expected_type, expected_lexeme=None, token=None):
+        token = token or self.current_token
+        line = token.line if token is not None else 1
+        column = token.column if token is not None else 1
+        file = getattr(token, 'file', None) if token is not None else None
+        label = expected_lexeme or expected_type
+        return Token(
+            expected_type,
+            f"<missing_{label}>",
+            max(1, line),
+            max(1, column),
+            file=file,
+            error=f"Missing {label}",
+        )
+
+    def _report(self, message, token=None, length=None):
+        token = token or self.current_token
+        line = max(1, getattr(token, 'line', 1))
+        column = max(1, getattr(token, 'column', 1))
+        file = getattr(token, 'file', None) or '<input>'
+        diagnostic = self.diagnostics.error(
+            message=message,
+            file=file,
+            line=line,
+            column=column,
+            length=max(
+                1,
+                length
+                if length is not None
+                else len(getattr(token, 'lexeme', '') or ''),
+            ),
+        )
+        self.errors.append(str(diagnostic))
+        return diagnostic
+
+    def match(self, expected_type, error_msg=None):
         token = self.peek()
-        if token and token.type == expected_type:
-            if expected_lexeme is not None and token.lexeme != expected_lexeme:
-                err_msg = f"Expected '{expected_lexeme}', got '{token.lexeme}'"
-                self.panic(err_msg, token)
-                return Token(expected_type, f"<missing_{expected_lexeme}>",
-                           token.line if token else 0,
-                           token.column if token else 0)
+        if self._matches(token, expected_type):
             self.advance()
             return token
-        else:
-            if error_msg is None:
-                error_msg = f"Expected '{expected_type}', got '{token.type if token else 'EOF'}'"
-            self.panic(error_msg, token)
-            return Token(expected_type, f"<missing_{expected_type}>",
-                       token.line if token else 0,
-                       token.column if token else 0)
+        self._report(
+            error_msg
+            or (
+                f"Expected '{expected_type}', got "
+                f"'{token.type if token else 'EOF'}'"
+            ),
+            token,
+        )
+        return None
+
+    def expect(
+        self,
+        expected_type,
+        error_msg=None,
+        expected_lexeme=None,
+    ):
+        token = self.peek()
+        if self._matches(
+            token,
+            expected_type,
+            expected_lexeme,
+        ):
+            self.advance()
+            return token
+
+        actual = (
+            token.lexeme
+            if token is not None
+            else 'EOF'
+        )
+        expected = expected_lexeme or expected_type
+        self._report(
+            error_msg
+            or f"Expected '{expected}', got '{actual}'",
+            token,
+        )
+        # Insertion recovery: keep the current token for the caller.
+        return self._synthetic_token(
+            expected_type,
+            expected_lexeme,
+            token,
+        )
+
+    def _is_type_start(self, token=None):
+        token = token or self.current_token
+        if token is None or token.type != 'KEYWORD':
+            return False
+        return (
+            token.lexeme in self.TYPE_KEYWORDS
+            or token.lexeme == 'struct'
+        )
+
+    def _is_declaration_start(self, token=None):
+        return self._is_type_start(token)
+
+    def _is_statement_start(self, token=None):
+        token = token or self.current_token
+        if token is None:
+            return False
+        if token.type == 'DELIMITER' and token.lexeme in {'{', ';'}:
+            return True
+        if token.type == 'KEYWORD':
+            return token.lexeme in self.STATEMENT_KEYWORDS
+        return token.type in {
+            'IDENTIFIER', 'INTEGER', 'FLOAT', 'STRING', 'CHARACTER'
+        } or (
+            token.type == 'DELIMITER'
+            and token.lexeme == '('
+        ) or (
+            token.type == 'OPERATOR'
+            and token.lexeme in {'-', '!', '&', '*'}
+        )
+
+    def synchronize_declaration(self):
+        while self.current_token is not None:
+            if self._is_declaration_start():
+                return
+            self.advance()
+
+    def synchronize_statement(self):
+        while self.current_token is not None:
+            token = self.current_token
+            if token.type == 'DELIMITER':
+                if token.lexeme == ';':
+                    self.advance()
+                    return
+                if token.lexeme == '}':
+                    return
+            if (
+                token.type == 'KEYWORD'
+                and token.lexeme in self.STATEMENT_KEYWORDS
+            ):
+                return
+            self.advance()
 
     def is_sync_point(self):
-        if not self.current_token:
+        token = self.current_token
+        if token is None:
             return True
-        sync_set = { 'SEMI', 'RBRACE', 'LBRACE', 'KEYWORD' }  
-        if self.current_token.type in sync_set:
+        if token.type == 'DELIMITER' and token.lexeme in {';', '}', '{'}:
             return True
-        if self.current_token.type == 'KEYWORD' and self.current_token.lexeme in {'if', 'while', 'for', 'return'}:
-            return True
-        return False
+        return (
+            token.type == 'KEYWORD'
+            and token.lexeme in self.STATEMENT_KEYWORDS
+        )
 
     def sync(self):
-        while self.current_token and not self.is_sync_point():
-            self.advance()
-        if self.current_token:
-            self.advance()
+        self.synchronize_statement()
 
     def panic(self, message, token=None):
-        if token is None:
-            token = self.current_token
-        line = token.line if token else 0
-        col = token.column if token else 0
-        self.errors.append(f"Syntax Error at {line}:{col} - {message}")
-        self.sync()
+        self._report(message, token)
+        self.synchronize_statement()
 
     def parse_program(self) -> Program:
-        loc = self.current_token  
+        loc_token = self.current_token
         declarations = []
+
         while self.current_token is not None:
-            decl = self.parse_declaration()
-            if decl:
-                declarations.append(decl)
-            else:
-                if self.current_token:
-                    self.advance()
-        return Program(declarations, loc=(loc.line if loc else 0, loc.column if loc else 0))
+            start_pos = self.pos
+            declaration = self.parse_declaration()
+            if declaration is not None:
+                declarations.append(declaration)
+
+            if self.pos == start_pos:
+                self.advance()
+
+        return Program(
+            declarations,
+            loc=(
+                max(1, loc_token.line)
+                if loc_token is not None
+                else 1,
+                max(1, loc_token.column)
+                if loc_token is not None
+                else 1,
+            ),
+        )
 
     def parse_declaration(self):
         token = self.current_token
-        if not token:
+        if token is None:
             return None
-        if token.type == 'KEYWORD' and token.lexeme in {'int', 'float', 'char', 'void', 'double'}:
+
+        if token.type == 'INVALID':
+            self._report(
+                token.error
+                or f"Invalid token '{token.lexeme}'",
+                token,
+            )
+            self.advance()
+            self.synchronize_declaration()
+            return None
+
+        if token.type == 'KEYWORD' and token.lexeme in self.TYPE_KEYWORDS:
             return self.parse_function_or_var_decl()
-        elif token.type == 'KEYWORD' and token.lexeme == 'struct':
-            return self.parse_struct_decl()
-        self.panic(f"Unexpected token '{token.lexeme}' in declaration", token)
+
+        if token.type == 'KEYWORD' and token.lexeme == 'struct':
+            # struct Name { ... }; is a type declaration.
+            # struct Name variable; is an ordinary variable declaration.
+            after_name = self.peek(2)
+            if (
+                after_name is not None
+                and after_name.type == 'DELIMITER'
+                and after_name.lexeme == '{'
+            ):
+                return self.parse_struct_decl()
+            return self.parse_function_or_var_decl()
+
+        self._report(
+            f"Unexpected token '{token.lexeme}' in declaration",
+            token,
+        )
+        self.advance()
+        self.synchronize_declaration()
         return None
 
     def parse_function_or_var_decl(self):
         type_spec = self.parse_type_spec()
-        if not type_spec:
+        if type_spec is None:
+            self.synchronize_declaration()
             return None
-        ident_token = self.expect('IDENTIFIER', "Expected identifier after type specifier")
-        if not ident_token:
+
+        ident_token = self.peek()
+        if not self._matches(ident_token, 'IDENTIFIER'):
+            self._report(
+                "Expected identifier after type specifier",
+                ident_token,
+            )
+            self.synchronize_declaration()
             return None
+
+        self.advance()
         name = ident_token.lexeme
         loc = (ident_token.line, ident_token.column)
-        next_tok = self.current_token
-        if next_tok and next_tok.type == 'DELIMITER' and next_tok.lexeme == '(':
-            self.advance()  
+
+        if self._matches(self.current_token, 'DELIMITER', '('):
+            self.advance()
             params = self.parse_param_list()
-            self.expect('DELIMITER', "Expected ')' after parameters", ')')  
+            self.expect(
+                'DELIMITER',
+                "Expected ')' after parameters",
+                ')',
+            )
             body = self.parse_block()
-            return FuncDecl(type_spec, name, params, body, loc=loc)
-        else:
-            init_expr = None
-            if self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme == '=':
-                self.advance() 
-                init_expr = self.parse_expr()
-            self.expect('DELIMITER', "Expected ';' after variable declaration", ';')
-            return VarDecl(type_spec, name, init_expr, loc=loc)
+            return FuncDecl(
+                type_spec,
+                name,
+                params,
+                body,
+                loc=loc,
+            )
+
+        init_expr = None
+        if self._matches(self.current_token, 'OPERATOR', '='):
+            self.advance()
+            init_expr = self.parse_expr()
+
+        self.expect(
+            'DELIMITER',
+            "Expected ';' after variable declaration",
+            ';',
+        )
+        return VarDecl(
+            type_spec,
+            name,
+            init_expr,
+            loc=loc,
+        )
 
     def parse_type_spec(self):
         token = self.current_token
-        if not token or token.type != 'KEYWORD' or token.lexeme not in {'int', 'float', 'char', 'void', 'double'}:
-            self.panic(f"Expected type specifier, got '{token.lexeme if token else 'EOF'}'", token)
+        if token is None:
+            self._report("Expected type specifier, got 'EOF'", token)
             return None
-        type_name = token.lexeme
-        self.advance()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme == '*':
+
+        if token.type != 'KEYWORD':
+            self._report(
+                f"Expected type specifier, got '{token.lexeme}'",
+                token,
+            )
+            return None
+
+        if token.lexeme == 'struct':
+            self.advance()
+            name_token = self.peek()
+            if not self._matches(name_token, 'IDENTIFIER'):
+                self._report(
+                    "Expected struct name after 'struct'",
+                    name_token,
+                )
+                return None
+            self.advance()
+            type_name = f"struct {name_token.lexeme}"
+        elif token.lexeme in self.TYPE_KEYWORDS:
+            type_name = token.lexeme
+            self.advance()
+        else:
+            self._report(
+                f"Expected type specifier, got '{token.lexeme}'",
+                token,
+            )
+            return None
+
+        while self._matches(
+            self.current_token,
+            'OPERATOR',
+            '*',
+        ):
             type_name += '*'
             self.advance()
+
         return type_name
 
     def parse_struct_decl(self):
-        self.expect('KEYWORD', "Expected 'struct'", 'struct')
-        name_token = self.expect('IDENTIFIER', "Expected struct name")
+        struct_token = self.expect(
+            'KEYWORD',
+            "Expected 'struct'",
+            'struct',
+        )
+        name_token = self.expect(
+            'IDENTIFIER',
+            "Expected struct name",
+        )
         name = name_token.lexeme
         loc = (name_token.line, name_token.column)
 
-        self.expect('DELIMITER', "Expected '{' after struct name", '{')
+        self.expect(
+            'DELIMITER',
+            "Expected '{' after struct name",
+            '{',
+        )
         fields = []
-        while self.current_token and not (self.current_token.type == 'DELIMITER' and self.current_token.lexeme == '}'):
+
+        while (
+            self.current_token is not None
+            and not self._matches(
+                self.current_token,
+                'DELIMITER',
+                '}',
+            )
+        ):
+            start_pos = self.pos
             type_spec = self.parse_type_spec()
-            if not type_spec:
-                break
-            ident_token = self.expect('IDENTIFIER', "Expected field name")
-            field_name = ident_token.lexeme
-            self.expect('DELIMITER', "Expected ';' after field", ';')
-            fields.append(VarDecl(type_spec, field_name, None, loc=(ident_token.line, ident_token.column)))
+            if type_spec is None:
+                self.synchronize_statement()
+            else:
+                ident_token = self.peek()
+                if self._matches(ident_token, 'IDENTIFIER'):
+                    self.advance()
+                    self.expect(
+                        'DELIMITER',
+                        "Expected ';' after field",
+                        ';',
+                    )
+                    fields.append(
+                        VarDecl(
+                            type_spec,
+                            ident_token.lexeme,
+                            None,
+                            loc=(
+                                ident_token.line,
+                                ident_token.column,
+                            ),
+                        )
+                    )
+                else:
+                    self._report(
+                        "Expected field name",
+                        ident_token,
+                    )
+                    self.synchronize_statement()
+
+            if self.pos == start_pos:
+                self.advance()
+
         self.expect('DELIMITER', "Expected '}'", '}')
-        if self.current_token and self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ';':
+        if self._matches(
+            self.current_token,
+            'DELIMITER',
+            ';',
+        ):
             self.advance()
+
         return StructDecl(name, fields, loc=loc)
 
     def parse_param_list(self):
         params = []
-        if self.current_token and self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ')':
+        if self._matches(
+            self.current_token,
+            'DELIMITER',
+            ')',
+        ):
             return params
-        params.append(self.parse_param())
-        while self.current_token and self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ',':
-            self.advance()  
-            params.append(self.parse_param())
+
+        while self.current_token is not None:
+            parameter = self.parse_param()
+            if parameter is not None:
+                params.append(parameter)
+
+            if self._matches(
+                self.current_token,
+                'DELIMITER',
+                ',',
+            ):
+                self.advance()
+                continue
+            break
+
         return params
 
     def parse_param(self):
         type_spec = self.parse_type_spec()
-        if not type_spec:
+        if type_spec is None:
             return None
-        ident_token = self.expect('IDENTIFIER', "Expected parameter name")
-        return Param(type_spec, ident_token.lexeme, loc=(ident_token.line, ident_token.column))
+
+        ident_token = self.peek()
+        if not self._matches(ident_token, 'IDENTIFIER'):
+            self._report(
+                "Expected parameter name",
+                ident_token,
+            )
+            return None
+
+        self.advance()
+        return Param(
+            type_spec,
+            ident_token.lexeme,
+            loc=(ident_token.line, ident_token.column),
+        )
 
     def parse_block(self):
         loc_token = self.current_token
-        self.expect('DELIMITER', "Expected '{'", '{')
+        if not self._matches(
+            self.current_token,
+            'DELIMITER',
+            '{',
+        ):
+            self._report("Expected '{'", self.current_token)
+            return Block(
+                [],
+                loc=(
+                    getattr(loc_token, 'line', 1),
+                    getattr(loc_token, 'column', 1),
+                ),
+            )
+
+        self.advance()
         statements = []
-        while self.current_token and not (self.current_token.type == 'DELIMITER' and self.current_token.lexeme == '}'):
-            stmt = self.parse_statement()
-            if stmt:
-                statements.append(stmt)
-            else:
-                if self.current_token:
-                    self.advance()
+
+        while (
+            self.current_token is not None
+            and not self._matches(
+                self.current_token,
+                'DELIMITER',
+                '}',
+            )
+        ):
+            start_pos = self.pos
+            statement = self.parse_statement()
+            if statement is not None:
+                statements.append(statement)
+            if self.pos == start_pos:
+                self.advance()
+
         self.expect('DELIMITER', "Expected '}'", '}')
-        return Block(statements, loc=(loc_token.line if loc_token else 0, loc_token.column if loc_token else 0))
+        return Block(
+            statements,
+            loc=(
+                loc_token.line if loc_token is not None else 1,
+                loc_token.column if loc_token is not None else 1,
+            ),
+        )
 
     def parse_statement(self):
         token = self.current_token
-        if not token:
+        if token is None:
             return None
+
+        if token.type == 'INVALID':
+            self._report(
+                token.error
+                or f"Invalid token '{token.lexeme}'",
+                token,
+            )
+            self.advance()
+            self.synchronize_statement()
+            return None
+
         if token.type == 'KEYWORD':
             if token.lexeme == 'if':
                 return self.parse_if_stmt()
-            elif token.lexeme == 'while':
+            if token.lexeme == 'while':
                 return self.parse_while_stmt()
-            elif token.lexeme == 'for':
+            if token.lexeme == 'for':
                 return self.parse_for_stmt()
-            elif token.lexeme == 'return':
+            if token.lexeme == 'return':
                 return self.parse_return_stmt()
-            elif token.lexeme in {'int', 'float', 'char', 'void', 'double'}:
+            if token.lexeme == 'break':
+                return self.parse_break_stmt()
+            if token.lexeme == 'continue':
+                return self.parse_continue_stmt()
+            if token.lexeme in self.TYPE_KEYWORDS or token.lexeme == 'struct':
                 return self.parse_var_decl_statement()
-        elif token.type == 'DELIMITER' and token.lexeme == '{':
+
+            self._report(
+                f"Unsupported statement keyword '{token.lexeme}'",
+                token,
+            )
+            self.advance()
+            self.synchronize_statement()
+            return None
+
+        if self._matches(token, 'DELIMITER', '{'):
             return self.parse_block()
-        elif token.type == 'DELIMITER' and token.lexeme == ';':
+
+        if self._matches(token, 'DELIMITER', ';'):
             self.advance()
             return ExprStmt(None, loc=(token.line, token.column))
+
         return self.parse_expr_stmt()
 
     def parse_var_decl_statement(self):
         type_spec = self.parse_type_spec()
-        if not type_spec:
+        if type_spec is None:
+            self.synchronize_statement()
             return None
-        ident_token = self.expect('IDENTIFIER', "Expected identifier")
-        name = ident_token.lexeme
-        loc = (ident_token.line, ident_token.column)
+
+        ident_token = self.peek()
+        if not self._matches(ident_token, 'IDENTIFIER'):
+            self._report("Expected identifier", ident_token)
+            self.synchronize_statement()
+            return None
+
+        self.advance()
         init_expr = None
-        if self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme == '=':
+        if self._matches(
+            self.current_token,
+            'OPERATOR',
+            '=',
+        ):
             self.advance()
             init_expr = self.parse_expr()
-        self.expect('DELIMITER', "Expected ';' after variable declaration", ';')
-        return VarDecl(type_spec, name, init_expr, loc=loc)
+
+        self.expect(
+            'DELIMITER',
+            "Expected ';' after variable declaration",
+            ';',
+        )
+        return VarDecl(
+            type_spec,
+            ident_token.lexeme,
+            init_expr,
+            loc=(ident_token.line, ident_token.column),
+        )
 
     def parse_if_stmt(self):
         loc_token = self.current_token
-        self.advance()  
-        self.expect('DELIMITER', "Expected '(' after 'if'", '(')
+        self.advance()
+        self.expect(
+            'DELIMITER',
+            "Expected '(' after 'if'",
+            '(',
+        )
         condition = self.parse_expr()
-        self.expect('DELIMITER', "Expected ')' after condition", ')')
+        self.expect(
+            'DELIMITER',
+            "Expected ')' after condition",
+            ')',
+        )
         then_stmt = self.parse_statement()
         else_stmt = None
-        if self.current_token and self.current_token.type == 'KEYWORD' and self.current_token.lexeme == 'else':
+        if (
+            self.current_token is not None
+            and self.current_token.type == 'KEYWORD'
+            and self.current_token.lexeme == 'else'
+        ):
             self.advance()
             else_stmt = self.parse_statement()
-        return IfStmt(condition, then_stmt, else_stmt, loc=(loc_token.line, loc_token.column))
+        return IfStmt(
+            condition,
+            then_stmt,
+            else_stmt,
+            loc=(loc_token.line, loc_token.column),
+        )
 
     def parse_while_stmt(self):
         loc_token = self.current_token
-        self.advance() 
-        self.expect('DELIMITER', "Expected '(' after 'while'", '(')
+        self.advance()
+        self.expect(
+            'DELIMITER',
+            "Expected '(' after 'while'",
+            '(',
+        )
         condition = self.parse_expr()
-        self.expect('DELIMITER', "Expected ')' after condition", ')')
+        self.expect(
+            'DELIMITER',
+            "Expected ')' after condition",
+            ')',
+        )
         body = self.parse_statement()
-        return WhileStmt(condition, body, loc=(loc_token.line, loc_token.column))
+        return WhileStmt(
+            condition,
+            body,
+            loc=(loc_token.line, loc_token.column),
+        )
 
     def parse_for_stmt(self):
         loc_token = self.current_token
-        self.advance()  
-        self.expect('DELIMITER', "Expected '(' after 'for'", '(')
-        init_stmt = self.parse_expr_stmt()  
+        self.advance()
+        self.expect(
+            'DELIMITER',
+            "Expected '(' after 'for'",
+            '(',
+        )
+
+        if self._matches(
+            self.current_token,
+            'DELIMITER',
+            ';',
+        ):
+            init_stmt = ExprStmt(
+                None,
+                loc=(
+                    self.current_token.line,
+                    self.current_token.column,
+                ),
+            )
+            self.advance()
+        elif self._is_type_start():
+            init_stmt = self.parse_var_decl_statement()
+        else:
+            init_stmt = self.parse_expr_stmt()
+
         cond_stmt = self.parse_expr_stmt()
+
         inc_expr = None
-        if self.current_token and self.current_token.type != 'DELIMITER' and self.current_token.lexeme != ')':
+        if not self._matches(
+            self.current_token,
+            'DELIMITER',
+            ')',
+        ):
             inc_expr = self.parse_expr()
-        self.expect('DELIMITER', "Expected ')' after for clauses", ')')
+
+        self.expect(
+            'DELIMITER',
+            "Expected ')' after for clauses",
+            ')',
+        )
         body = self.parse_statement()
-        return ForStmt(init_stmt, cond_stmt, inc_expr, body, loc=(loc_token.line, loc_token.column))
+        return ForStmt(
+            init_stmt,
+            cond_stmt,
+            inc_expr,
+            body,
+            loc=(loc_token.line, loc_token.column),
+        )
 
     def parse_return_stmt(self):
         loc_token = self.current_token
-        self.advance()  
-        expr = None
-        if self.current_token and not (self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ';'):
-            expr = self.parse_expr()
-        self.expect('DELIMITER', "Expected ';' after return", ';')
-        return ReturnStmt(expr, loc=(loc_token.line, loc_token.column))
+        self.advance()
+        expression = None
+        if not self._matches(
+            self.current_token,
+            'DELIMITER',
+            ';',
+        ):
+            expression = self.parse_expr()
+        self.expect(
+            'DELIMITER',
+            "Expected ';' after return",
+            ';',
+        )
+        return ReturnStmt(
+            expression,
+            loc=(loc_token.line, loc_token.column),
+        )
+
+    def parse_break_stmt(self):
+        loc_token = self.current_token
+        self.advance()
+        self.expect(
+            'DELIMITER',
+            "Expected ';' after break",
+            ';',
+        )
+        return BreakStmt(
+            loc=(loc_token.line, loc_token.column),
+        )
+
+    def parse_continue_stmt(self):
+        loc_token = self.current_token
+        self.advance()
+        self.expect(
+            'DELIMITER',
+            "Expected ';' after continue",
+            ';',
+        )
+        return ContinueStmt(
+            loc=(loc_token.line, loc_token.column),
+        )
 
     def parse_expr_stmt(self):
-        loc = self.current_token
-        expr = None
-        if self.current_token and not (self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ';'):
-            expr = self.parse_expr()
+        loc_token = self.current_token
+        expression = None
+        if not self._matches(
+            self.current_token,
+            'DELIMITER',
+            ';',
+        ):
+            expression = self.parse_expr()
+
         self.expect('DELIMITER', "Expected ';'", ';')
-        return ExprStmt(expr, loc=(loc.line if loc else 0, loc.column if loc else 0))
+        return ExprStmt(
+            expression,
+            loc=(
+                loc_token.line if loc_token is not None else 1,
+                loc_token.column if loc_token is not None else 1,
+            ),
+        )
 
     def parse_expr(self):
         return self.parse_assignment()
 
     def parse_assignment(self):
         left = self.parse_logical_or()
-        if left and isinstance(left, Identifier):
-            token = self.current_token
-            if token and token.type == 'OPERATOR' and token.lexeme in {'=', '+=', '-=', '*='}:
-                self.advance()
-                right = self.parse_assignment()
-                return BinaryExpr(left, token.lexeme, right, loc=(token.line, token.column))
+        token = self.current_token
+        if (
+            isinstance(left, Identifier)
+            and token is not None
+            and token.type == 'OPERATOR'
+            and token.lexeme in {
+                '=', '+=', '-=', '*=', '/=', '%='
+            }
+        ):
+            self.advance()
+            right = self.parse_assignment()
+            return BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_logical_or(self):
         left = self.parse_logical_and()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme == '||':
-            op_token = self.current_token
+        while self._matches(
+            self.current_token,
+            'OPERATOR',
+            '||',
+        ):
+            token = self.current_token
             self.advance()
             right = self.parse_logical_and()
-            left = BinaryExpr(left, '||', right, loc=(op_token.line, op_token.column))
+            left = BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_logical_and(self):
         left = self.parse_equality()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme == '&&':
-            op_token = self.current_token
+        while self._matches(
+            self.current_token,
+            'OPERATOR',
+            '&&',
+        ):
+            token = self.current_token
             self.advance()
             right = self.parse_equality()
-            left = BinaryExpr(left, '&&', right, loc=(op_token.line, op_token.column))
+            left = BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_equality(self):
         left = self.parse_relational()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme in {'==', '!='}:
-            op_token = self.current_token
+        while (
+            self.current_token is not None
+            and self.current_token.type == 'OPERATOR'
+            and self.current_token.lexeme in {'==', '!='}
+        ):
+            token = self.current_token
             self.advance()
             right = self.parse_relational()
-            left = BinaryExpr(left, op_token.lexeme, right, loc=(op_token.line, op_token.column))
+            left = BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_relational(self):
         left = self.parse_additive()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme in {'<', '>', '<=', '>='}:
-            op_token = self.current_token
+        while (
+            self.current_token is not None
+            and self.current_token.type == 'OPERATOR'
+            and self.current_token.lexeme in {
+                '<', '>', '<=', '>='
+            }
+        ):
+            token = self.current_token
             self.advance()
             right = self.parse_additive()
-            left = BinaryExpr(left, op_token.lexeme, right, loc=(op_token.line, op_token.column))
+            left = BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_additive(self):
         left = self.parse_multiplicative()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme in {'+', '-'}:
-            op_token = self.current_token
+        while (
+            self.current_token is not None
+            and self.current_token.type == 'OPERATOR'
+            and self.current_token.lexeme in {'+', '-'}
+        ):
+            token = self.current_token
             self.advance()
             right = self.parse_multiplicative()
-            left = BinaryExpr(left, op_token.lexeme, right, loc=(op_token.line, op_token.column))
+            left = BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_multiplicative(self):
         left = self.parse_unary()
-        while self.current_token and self.current_token.type == 'OPERATOR' and self.current_token.lexeme in {'*', '/', '%'}:
-            op_token = self.current_token
+        while (
+            self.current_token is not None
+            and self.current_token.type == 'OPERATOR'
+            and self.current_token.lexeme in {'*', '/', '%'}
+        ):
+            token = self.current_token
             self.advance()
             right = self.parse_unary()
-            left = BinaryExpr(left, op_token.lexeme, right, loc=(op_token.line, op_token.column))
+            left = BinaryExpr(
+                left,
+                token.lexeme,
+                right,
+                loc=(token.line, token.column),
+            )
         return left
 
     def parse_unary(self):
         token = self.current_token
-        if token and token.type == 'OPERATOR' and token.lexeme in {'-', '!', '&', '*'}:
+        if (
+            token is not None
+            and token.type == 'OPERATOR'
+            and token.lexeme in {'-', '!', '&', '*'}
+        ):
             self.advance()
             operand = self.parse_unary()
-            return UnaryExpr(token.lexeme, operand, loc=(token.line, token.column))
+            return UnaryExpr(
+                token.lexeme,
+                operand,
+                loc=(token.line, token.column),
+            )
         return self.parse_postfix()
 
     def parse_postfix(self):
         node = self.parse_primary()
+
         while True:
             token = self.current_token
-            if not token:
+            if token is None:
                 break
-            if token.type == 'DELIMITER' and token.lexeme == '[':
+
+            if self._matches(token, 'DELIMITER', '['):
                 self.advance()
                 index_expr = self.parse_expr()
                 self.expect('DELIMITER', "Expected ']'", ']')
-                node = BinaryExpr(node, '[]', index_expr, loc=(token.line, token.column))
-            elif token.type == 'DELIMITER' and token.lexeme == '(':
+                node = BinaryExpr(
+                    node,
+                    '[]',
+                    index_expr,
+                    loc=(token.line, token.column),
+                )
+                continue
+
+            if self._matches(token, 'DELIMITER', '('):
                 self.advance()
                 args = self.parse_arg_list()
                 self.expect('DELIMITER', "Expected ')'", ')')
                 if isinstance(node, Identifier):
-                    node = CallExpr(node.name, args, loc=(token.line, token.column))
+                    node = CallExpr(
+                        node.name,
+                        args,
+                        loc=(token.line, token.column),
+                    )
                 else:
-                    self.panic("Invalid function call target", token)
-                    node = CallExpr("", args, loc=(token.line, token.column))
-            elif token.type == 'OPERATOR' and token.lexeme == '.':
+                    self._report(
+                        "Invalid function call target",
+                        token,
+                    )
+                    node = CallExpr(
+                        "",
+                        args,
+                        loc=(token.line, token.column),
+                    )
+                continue
+
+            if (
+                token.type == 'OPERATOR'
+                and token.lexeme in {'.', '->'}
+            ):
+                operator = token.lexeme
                 self.advance()
-                ident_token = self.expect('IDENTIFIER', "Expected identifier after '.'")
-                node = BinaryExpr(node, '.', Identifier(ident_token.lexeme, loc=(ident_token.line, ident_token.column)), loc=(token.line, token.column))
-            elif token.type == 'OPERATOR' and token.lexeme == '->':
-                self.advance()
-                ident_token = self.expect('IDENTIFIER', "Expected identifier after '->'")
-                node = BinaryExpr(node, '->', Identifier(ident_token.lexeme, loc=(ident_token.line, ident_token.column)), loc=(token.line, token.column))
-            else:
-                break
+                ident_token = self.peek()
+                if self._matches(ident_token, 'IDENTIFIER'):
+                    self.advance()
+                else:
+                    self._report(
+                        f"Expected identifier after '{operator}'",
+                        ident_token or token,
+                    )
+                    ident_token = self._synthetic_token(
+                        'IDENTIFIER',
+                        None,
+                        ident_token or token,
+                    )
+                node = BinaryExpr(
+                    node,
+                    operator,
+                    Identifier(
+                        ident_token.lexeme,
+                        loc=(
+                            ident_token.line,
+                            ident_token.column,
+                        ),
+                    ),
+                    loc=(token.line, token.column),
+                )
+                continue
+
+            break
+
         return node
 
     def parse_primary(self):
         token = self.current_token
-        if not token:
-            self.panic("Unexpected EOF in primary expression")
-            return None
+        if token is None:
+            self._report("Unexpected EOF in primary expression")
+            return IntLiteral('0', loc=(1, 1))
 
         if token.type == 'INTEGER':
             self.advance()
-            return IntLiteral(token.lexeme, loc=(token.line, token.column))
-        elif token.type == 'FLOAT':
+            return IntLiteral(
+                token.lexeme,
+                loc=(token.line, token.column),
+            )
+        if token.type == 'FLOAT':
             self.advance()
-            return FloatLiteral(token.lexeme, loc=(token.line, token.column))
-        elif token.type == 'STRING':
+            return FloatLiteral(
+                token.lexeme,
+                loc=(token.line, token.column),
+            )
+        if token.type == 'STRING':
             self.advance()
-            return StringLiteral(token.lexeme, loc=(token.line, token.column))
-        elif token.type == 'CHARACTER':
+            return StringLiteral(
+                token.lexeme,
+                loc=(token.line, token.column),
+            )
+        if token.type == 'CHARACTER':
             self.advance()
-            return CharLiteral(token.lexeme, loc=(token.line, token.column))
-        elif token.type == 'IDENTIFIER':
+            return CharLiteral(
+                token.lexeme,
+                loc=(token.line, token.column),
+            )
+        if token.type == 'IDENTIFIER':
             self.advance()
-            return Identifier(token.lexeme, loc=(token.line, token.column))
-        elif token.type == 'DELIMITER' and token.lexeme == '(':
+            return Identifier(
+                token.lexeme,
+                loc=(token.line, token.column),
+            )
+        if self._matches(token, 'DELIMITER', '('):
             self.advance()
-            expr = self.parse_expr()
-            self.expect('DELIMITER', "Expected ')' after expression", ')')
-            return expr
-        else:
-            self.panic(f"Unexpected token '{token.lexeme}' in primary expression", token)
-            return None
+            expression = self.parse_expr()
+            self.expect(
+                'DELIMITER',
+                "Expected ')' after expression",
+                ')',
+            )
+            return expression
+
+        if token.type == 'INVALID':
+            self._report(
+                token.error
+                or f"Invalid token '{token.lexeme}'",
+                token,
+            )
+            self.advance()
+            return IntLiteral(
+                '0',
+                loc=(token.line, token.column),
+            )
+
+        # Missing-expression recovery: do not consume delimiters that the
+        # surrounding production still needs to match.
+        if (
+            token.type == 'DELIMITER'
+            and token.lexeme in {';', ')', ']', '}', ','}
+        ):
+            self._report(
+                f"Expected expression before '{token.lexeme}'",
+                token,
+            )
+            return IntLiteral(
+                '0',
+                loc=(token.line, token.column),
+            )
+
+        self._report(
+            f"Unexpected token '{token.lexeme}' in primary expression",
+            token,
+        )
+        self.advance()
+        return IntLiteral(
+            '0',
+            loc=(token.line, token.column),
+        )
 
     def parse_arg_list(self):
         args = []
-        if self.current_token and self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ')':
+        if self._matches(
+            self.current_token,
+            'DELIMITER',
+            ')',
+        ):
             return args
-        args.append(self.parse_expr())
-        while self.current_token and self.current_token.type == 'DELIMITER' and self.current_token.lexeme == ',':
-            self.advance()
+
+        while self.current_token is not None:
             args.append(self.parse_expr())
+            if self._matches(
+                self.current_token,
+                'DELIMITER',
+                ',',
+            ):
+                self.advance()
+                continue
+            break
+
         return args
